@@ -1,0 +1,96 @@
+# Azure DevOps Pipeline - Landing Zone Terraform
+# DevSecOps Stages: Lint -> Scan -> Plan -> Approve -> Apply
+# Author: Vikas Rao | Senior DevOps Engineer
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: ['environments/**', 'modules/**']
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: terraform-backend-secrets
+  - name: TF_VERSION
+    value: '1.6.6'
+
+stages:
+- stage: Validate
+  displayName: 'Validate and Lint'
+  jobs:
+  - job: TerraformLint
+    steps:
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: 
+    - script: terraform fmt -check -recursive
+      displayName: 'terraform fmt check'
+    - script: terraform validate
+      displayName: 'terraform validate'
+    - script: |
+        curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+        tflint --init && tflint --recursive
+      displayName: 'tflint'
+
+- stage: SecurityScan
+  displayName: 'Security Scan'
+  dependsOn: Validate
+  jobs:
+  - job: SecurityChecks
+    steps:
+    - script: |
+        pip install checkov
+        checkov -d . --framework terraform --output cli --output junitxml --output-file-path checkov-report.xml
+      displayName: 'Checkov IaC Security Scan'
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: checkov-report.xml
+        failTaskOnFailedTests: true
+    - script: |
+        docker run --rm -v "C:\DevopsInsider\Projects\GithubReadme_portfolio\Vikas98Rao:/src" aquasec/trivy:latest config /src --exit-code 1 --severity HIGH,CRITICAL
+      displayName: 'Trivy Config Scan'
+
+- stage: Plan
+  displayName: 'Terraform Plan'
+  dependsOn: SecurityScan
+  jobs:
+  - job: TerraformPlan
+    steps:
+    - script: terraform init -backend-config="environments/prod/backend.conf"
+      displayName: 'terraform init'
+      env:
+        ARM_CLIENT_ID: 
+        ARM_CLIENT_SECRET: 
+        ARM_SUBSCRIPTION_ID: 
+        ARM_TENANT_ID: 
+    - script: terraform plan -out=tfplan -detailed-exitcode
+      displayName: 'terraform plan'
+
+- stage: Approval
+  displayName: 'Manual Approval Gate'
+  dependsOn: Plan
+  jobs:
+  - deployment: ApprovalGate
+    environment: 'production-approval'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approval granted - proceeding with apply"
+
+- stage: Apply
+  displayName: 'Terraform Apply'
+  dependsOn: Approval
+  jobs:
+  - job: TerraformApply
+    steps:
+    - script: terraform apply -auto-approve tfplan
+      displayName: 'terraform apply'
+      env:
+        ARM_CLIENT_ID: 
+        ARM_CLIENT_SECRET: 
+        ARM_SUBSCRIPTION_ID: 
+        ARM_TENANT_ID: 
